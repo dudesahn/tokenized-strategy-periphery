@@ -306,9 +306,9 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
 
     /**
      * @notice Add a new reward token to the staking contract.
-     * @dev May only be called by owner, and can't be set to zero address. Add reward tokens sparingly, as each new one
-     *  will increase gas costs. This must be set before notifyRewardAmount can be used.
-     * @dev A rewardsDuration of 1 dictates instant release of rewards.
+     * @dev May only be called by management, and can't be set to zero address. Add reward tokens sparingly, as each new
+     *  one will increase gas costs. This must be set before notifyRewardAmount can be used. A rewardsDuration of 1
+     *  dictates instant release of rewards.
      * @param _rewardsToken Address of the rewards token.
      * @param _rewardsDistributor Address of the rewards distributor.
      * @param _rewardsDuration The duration of our rewards distribution for staking in seconds.
@@ -342,26 +342,29 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         rewardData[_rewardsToken].rewardsDuration = _rewardsDuration;
     }
 
-    /// @notice Set the duration of our rewards period.
-    /// @dev May only be called by owner, and must be done after most recent period ends.
-    /// @dev A rewardsDuration of 1 dictates instant release of rewards.
-    /// @param _rewardsDuration New length of period in seconds.
+    /**
+     * @notice Set the duration of our rewards period.
+     * @dev May only be called by management, and must be done after most recent period ends.
+     * @param _rewardsToken Address of the rewards token.
+     * @param _rewardsDuration New length of period in seconds.
+     */
     function setRewardsDuration(
-        address rewardToken,
+        address _rewardToken,
         uint256 _rewardsDuration
     ) external virtual onlyManagement {
-        _setRewardsDuration(rewardToken, _rewardsDuration);
+        _setRewardsDuration(_rewardToken, _rewardsDuration);
     }
 
     function _setRewardsDuration(
-        address rewardToken,
+        address _rewardToken,
         uint256 _rewardsDuration
     ) internal virtual {
         require(
-            block.timestamp > rewardData[rewardToken].periodFinish,
+            block.timestamp > rewardData[_rewardToken].periodFinish,
             "Previous rewards period must be complete before changing the duration for the new period"
         );
-        rewardData[rewardToken].rewardsDuration = _rewardsDuration;
-        emit RewardsDurationUpdated(rewardToken, _rewardsDuration);
+        require(_rewardsDuration > 0, "Must be >0");
+        rewardData[_rewardToken].rewardsDuration = _rewardsDuration;
+        emit RewardsDurationUpdated(_rewardToken, _rewardsDuration);
     }
 }
