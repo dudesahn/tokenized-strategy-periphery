@@ -5,6 +5,8 @@ import {BaseHooks, ERC20} from "../Hooks/BaseHooks.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
+// SHOULD THINK ABOUT RE-ORDERING TO MATCH THE FLOW OF MY VERSION OF MULTI STAKING CONTRACT
+
 abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
     using SafeERC20 for ERC20;
 
@@ -38,20 +40,28 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
 
     /* ========== EVENTS ========== */
 
-    event RewardAdded(address rewardToken, uint256 reward);
-    event RewardPaid(address indexed user, address rewardToken, uint256 reward);
-    event RewardsDurationUpdated(address rewardToken, uint256 newDuration);
-    event NotifiedWithZeroSupply(address rewardToken, uint256 reward);
+    event RewardAdded(address indexed rewardToken, uint256 reward);
+    event RewardPaid(
+        address indexed user,
+        address indexed rewardToken,
+        uint256 reward
+    );
+    event RewardsDurationUpdated(
+        address indexed rewardToken,
+        uint256 newDuration
+    );
+    event NotifiedWithZeroSupply(address indexed rewardToken, uint256 reward);
+    event Recovered(address token, uint256 amount);
 
     /* ========== MODIFIERS ========== */
 
-    modifier updateReward(address account) {
-        _updateReward(account);
+    modifier updateReward(address _account) {
+        _updateReward(_account);
         _;
     }
 
-    function _updateReward(address account) internal virtual {
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+    function _updateReward(address _account) internal virtual {
+        for (uint256 i; i < rewardTokens.length; ++i) {
             address rewardToken = rewardTokens[i];
             rewardData[rewardToken].rewardPerTokenStored = rewardPerToken(
                 rewardToken
@@ -59,9 +69,9 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
             rewardData[rewardToken].lastUpdateTime = lastTimeRewardApplicable(
                 rewardToken
             );
-            if (account != address(0)) {
-                rewards[account][rewardToken] = earned(account, rewardToken);
-                userRewardPerTokenPaid[account][rewardToken] = rewardData[
+            if (_account != address(0)) {
+                rewards[_account][rewardToken] = earned(_account, rewardToken);
+                userRewardPerTokenPaid[_account][rewardToken] = rewardData[
                     rewardToken
                 ].rewardPerTokenStored;
             }
@@ -118,21 +128,23 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
 
     /// @notice Either the current timestamp or end of the most recent period.
     function lastTimeRewardApplicable(
-        address rewardToken
+        address _rewardToken
     ) public view virtual returns (uint256) {
         return
-            block.timestamp < rewardData[rewardToken].periodFinish
+            block.timestamp < rewardData[_rewardToken].periodFinish
                 ? block.timestamp
-                : rewardData[rewardToken].periodFinish;
+                : rewardData[_rewardToken].periodFinish;
     }
 
     /// @notice Reward paid out per whole token.
     function rewardPerToken(
-        address rewardToken
+        address _rewardToken
     ) public view virtual returns (uint256) {
         uint256 _totalSupply = TokenizedStrategy.totalSupply();
-        if (_totalSupply == 0 || rewardData[rewardToken].rewardsDuration == 1) {
-            return rewardData[rewardToken].rewardPerTokenStored;
+        if (
+            _totalSupply == 0 || rewardData[_rewardToken].rewardsDuration == 1
+        ) {
+            return rewardData[_rewardToken].rewardPerTokenStored;
         }
 
         if (TokenizedStrategy.isShutdown()) {
@@ -140,17 +152,17 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         }
 
         return
-            rewardData[rewardToken].rewardPerTokenStored +
-            (((lastTimeRewardApplicable(rewardToken) -
-                rewardData[rewardToken].lastUpdateTime) *
-                rewardData[rewardToken].rewardRate *
+            rewardData[_rewardToken].rewardPerTokenStored +
+            (((lastTimeRewardApplicable(_rewardToken) -
+                rewardData[_rewardToken].lastUpdateTime) *
+                rewardData[_rewardToken].rewardRate *
                 1e18) / _totalSupply);
     }
 
     /// @notice Amount of reward token pending claim by an account.
     function earned(
         address account,
-        address rewardToken
+        address _rewardToken
     ) public view virtual returns (uint256) {
         if (TokenizedStrategy.isShutdown()) {
             return 0;
@@ -158,19 +170,19 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
 
         return
             (TokenizedStrategy.balanceOf(account) *
-                (rewardPerToken(rewardToken) -
-                    userRewardPerTokenPaid[account][rewardToken])) /
+                (rewardPerToken(_rewardToken) -
+                    userRewardPerTokenPaid[account][_rewardToken])) /
             1e18 +
-            rewards[account][rewardToken];
+            rewards[account][_rewardToken];
     }
 
     /// @notice Reward tokens emitted over the entire rewardsDuration.
     function getRewardForDuration(
-        address rewardToken
+        address _rewardToken
     ) external view virtual returns (uint256) {
         return
-            rewardData[rewardToken].rewardRate *
-            rewardData[rewardToken].rewardsDuration;
+            rewardData[_rewardToken].rewardRate *
+            rewardData[_rewardToken].rewardsDuration;
     }
 
     /**
@@ -385,5 +397,52 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         require(_rewardsDuration > 0, "Must be >0");
         rewardData[_rewardToken].rewardsDuration = _rewardsDuration;
         emit RewardsDurationUpdated(_rewardToken, _rewardsDuration);
+    }
+
+    /// @COMMENT decide on this one whether we want to keep the "isRetired" usage, would need to add it in elsewhere
+    /**
+     * @notice Sweep out tokens accidentally sent here.
+     * @dev May only be called by management. If a pool has multiple tokens to sweep out, call this once for each.
+     * @param _tokenAddress Address of token to sweep.
+     * @param _tokenAmount Amount of tokens to sweep.
+     */
+    function recoverERC20(
+        address _tokenAddress,
+        uint256 _tokenAmount
+    ) external onlyManagement {
+        if (_tokenAddress == address(asset)) revert("!asset");
+
+        // can only recover reward tokens 90 days after last reward token ends
+        bool isRewardToken;
+        address[] memory _rewardTokens = rewardTokens;
+        uint256 maxPeriodFinish;
+
+        for (uint256 i; i < _rewardTokens.length; ++i) {
+            uint256 rewardPeriodFinish = rewardData[_rewardTokens[i]]
+                .periodFinish;
+            if (rewardPeriodFinish > maxPeriodFinish) {
+                maxPeriodFinish = rewardPeriodFinish;
+            }
+
+            if (_rewardTokens[i] == _tokenAddress) {
+                isRewardToken = true;
+            }
+        }
+
+        if (isRewardToken) {
+            require(
+                block.timestamp > maxPeriodFinish + 90 days,
+                "wait >90 days"
+            );
+
+            // if we do this, automatically sweep all reward token
+            _tokenAmount = ERC20(_tokenAddress).balanceOf(address(this));
+
+            // retire this staking contract, this wipes all rewards but still allows all users to withdraw
+            isRetired = true;
+        }
+
+        ERC20(_tokenAddress).safeTransfer(owner(), _tokenAmount);
+        emit Recovered(_tokenAddress, _tokenAmount);
     }
 }
