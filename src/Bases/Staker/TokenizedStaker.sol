@@ -173,100 +173,118 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
             rewardData[rewardToken].rewardsDuration;
     }
 
-    /// @notice Notify staking contract that it has more reward to account for.
-    /// @dev Reward tokens must be sent to contract before notifying. May only be called
-    ///  by rewards distribution role.
-    /// @param rewardToken Address of the reward token.
-    /// @param reward Amount of reward tokens to add.
+    /**
+     * @notice Notify staking contract that it has more reward to account for.
+     * @dev May only be called by rewards distribution role or management. Set up token first via addReward().
+     * @param _rewardsToken Address of the rewards token.
+     * @param _rewardAmount Amount of reward tokens to add.
+     */
     function notifyRewardAmount(
-        address rewardToken,
-        uint256 reward
-    ) external virtual onlyManagement {
-        _notifyRewardAmount(rewardToken, reward);
+        address _rewardToken,
+        uint256 _rewardAmount
+    ) external virtual {
+        _notifyRewardAmount(_rewardToken, _rewardAmount);
     }
 
-    /// @notice Notify staking contract that it has more reward to account for.
-    /// @dev Reward tokens must be sent to contract before notifying. May only be called
-    ///  by rewards distribution role.
-    /// @param rewardToken Address of the reward token.
-    /// @param reward Amount of reward tokens to add.
     function _notifyRewardAmount(
-        address rewardToken,
-        uint256 reward
+        address _rewardToken,
+        uint256 _rewardAmount
     ) internal virtual updateReward(address(0)) {
-        /// @dev A rewardsDuration of 1 dictates instant release of rewards
-        if (rewardData[rewardToken].rewardsDuration == 1) {
-            _notifyRewardInstant(rewardToken, reward);
-            return;
-        }
+        Reward memory _rewardData = rewardData[_rewardsToken];
+        require(_rewardAmount > 0 && _rewardAmount < 1e30, "bad reward value");
+        require(
+            _rewardData.rewardsDistributor == msg.sender ||
+                msg.sender == TokenizedStrategy.management(),
+            "!authorized"
+        );
 
-        rewardData[rewardToken].lastRewardRate = rewardData[rewardToken]
-            .rewardRate;
-        rewardData[rewardToken].lastNotifyTime = block.timestamp;
+        // handle the transfer of reward tokens via `transferFrom` to reduce the number
+        // of transactions required and ensure correctness of the reward amount
+        ERC20(_rewardsToken).safeTransferFrom(
+            msg.sender,
+            address(this),
+            _rewardAmount
+        );
 
-        if (block.timestamp >= rewardData[rewardToken].periodFinish) {
-            rewardData[rewardToken].rewardRate =
-                reward /
-                rewardData[rewardToken].rewardsDuration;
-        } else {
-            uint256 remaining = rewardData[rewardToken].periodFinish -
-                block.timestamp;
-            uint256 leftover = remaining * rewardData[rewardToken].rewardRate;
-            rewardData[rewardToken].rewardRate =
-                (reward + leftover) /
-                rewardData[rewardToken].rewardsDuration;
-        }
-
-        rewardData[rewardToken].lastUpdateTime = block.timestamp;
-        rewardData[rewardToken].periodFinish =
-            block.timestamp +
-            rewardData[rewardToken].rewardsDuration;
-        emit RewardAdded(rewardToken, reward);
-    }
-
-    function _notifyRewardInstant(
-        address rewardToken,
-        uint256 reward
-    ) internal virtual {
-        // Update lastNotifyTime and lastRewardRate if needed
-        uint256 lastNotifyTime = rewardData[rewardToken].lastNotifyTime;
-        if (block.timestamp != lastNotifyTime) {
-            rewardData[rewardToken].lastRewardRate =
-                reward /
-                (block.timestamp - lastNotifyTime);
-            rewardData[rewardToken].lastNotifyTime = block.timestamp;
-        }
-
-        // Update rewardRate, lastUpdateTime, periodFinish
-        rewardData[rewardToken].rewardRate = 0;
-        rewardData[rewardToken].lastUpdateTime = block.timestamp;
-        rewardData[rewardToken].periodFinish = block.timestamp;
-
-        uint256 _totalSupply = TokenizedStrategy.totalSupply();
-
+        /// @COMMENT moved this from the instant version, good to prevent against generally tbh (see sommelier report)
         // If total supply is 0, send tokens to management instead of reverting.
         // Prevent footguns if _notifyRewardInstant() is part of predeposit hooks.
+        uint256 _totalSupply = TokenizedStrategy.totalSupply();
         if (_totalSupply == 0) {
             address management = TokenizedStrategy.management();
 
-            ERC20(rewardToken).safeTransfer(management, reward);
-            emit NotifiedWithZeroSupply(rewardToken, reward);
+            ERC20(_rewardToken).safeTransfer(management, _rewardAmount);
+            emit NotifiedWithZeroSupply(_rewardToken, reward);
             return;
         }
 
+        /// @dev A rewardsDuration of 1 dictates instant release of rewards
+        if (_rewardData.rewardsDuration == 1) {
+            _notifyRewardInstant(_rewardToken, _rewardAmount, _rewardData);
+        } else {
+            // store current rewardRate
+            _rewardData.lastRewardRate = _rewardData.rewardRate;
+
+            // update time-based struct fields
+            _rewardData.lastNotifyTime = block.timestamp;
+            _rewardData.lastUpdateTime = block.timestamp;
+            _rewardData.periodFinish =
+                block.timestamp +
+                _rewardData.rewardsDuration;
+
+            // update our rewardData with our new rewardRate
+            if (block.timestamp >= _rewardData.periodFinish) {
+                _rewardData.rewardRate =
+                    _rewardAmount /
+                    _rewardData.rewardsDuration;
+            } else {
+                _rewardData.rewardRate =
+                    (_rewardAmount +
+                        (_rewardData.periodFinish - block.timestamp) *
+                        _rewardData.rewardRate) /
+                    _rewardData.rewardsDuration;
+            }
+
+            // write to storage
+            rewardData[_rewardsToken] = _rewardData;
+            emit RewardAdded(_rewardsToken, _rewardAmount);
+        }
+    }
+
+    function _notifyRewardInstant(
+        address _rewardToken,
+        uint256 _rewardAmount,
+        Reward memory _rewardData
+    ) internal virtual {
+        // Update lastNotifyTime and lastRewardRate if needed
+        if (block.timestamp != _rewardData.lastNotifyTime) {
+            _rewardData.lastRewardRate =
+                _rewardAmount /
+                (block.timestamp - _rewardData.lastNotifyTime); ///@COMMENT I think this should include the non-instant? guess not since you must wait until period ends to update length,
+            // so if we're notifying instant we know there isn't any other rewards that will be available that block. *** can you notify twice in the same block?
+            _rewardData.lastNotifyTime = block.timestamp;
+        }
+
+        // Update rewardRate, lastUpdateTime, periodFinish
+        _rewardData.rewardRate = 0; /// @COMMENT not sure if this is correct...shouldn't we still calculate this?
+        _rewardData.lastUpdateTime = block.timestamp;
+        _rewardData.periodFinish = block.timestamp;
+
         // Instantly release rewards by modifying rewardPerTokenStored
-        rewardData[rewardToken].rewardPerTokenStored =
-            rewardData[rewardToken].rewardPerTokenStored +
+        rewardData[_rewardToken].rewardPerTokenStored =
+            rewardData[_rewardToken].rewardPerTokenStored +
             (reward * 1e18) /
             _totalSupply;
 
-        emit RewardAdded(rewardToken, reward);
+        // write to storage
+        rewardData[_rewardsToken] = _rewardData;
+        emit RewardAdded(_rewardsToken, _rewardAmount);
     }
 
     /// @notice Claim any earned reward tokens.
     /// @dev Can claim rewards even if no tokens still staked.
     function getReward() public virtual nonReentrant updateReward(msg.sender) {
-        for (uint256 i = 0; i < rewardTokens.length; i++) {
+        for (uint256 i = 0; i < rewardTokens.length; ++i) {
             address rewardToken = rewardTokens[i];
             uint256 reward = rewards[msg.sender][rewardToken];
             if (reward > 0) {
@@ -294,6 +312,7 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
     }
 
     /// @notice Unstake all of the sender's tokens and claim any outstanding rewards.
+    /// @COMMENT should probably allow user to pass in how much loss they want to allow here...or have settable MAX_LOSS?
     function exit() external virtual {
         redeem(
             TokenizedStrategy.balanceOf(msg.sender),
