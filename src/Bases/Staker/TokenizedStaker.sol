@@ -5,7 +5,10 @@ import {BaseHooks, ERC20} from "../Hooks/BaseHooks.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-// SHOULD THINK ABOUT RE-ORDERING TO MATCH THE FLOW OF MY VERSION OF MULTI STAKING CONTRACT
+// SHOULD THINK ABOUT RE-ORDERING TO MATCH THE FLOW OF MY VERSION OF MULTI STAKING CONTRACT, at least for final diffs
+// think about any issues around minting token shares to fees...will this break any of the rewards calculation?
+// I think we'll probably just end up with unclaimable rewards token that eventually need to get swept out at the end? since totalSupply increases but the account can't claim any
+// actually, the predeposit hook is called prior to minting, so those people should earn just fine
 
 abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
     using SafeERC20 for ERC20;
@@ -83,6 +86,12 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
 
     /// @notice The address of our reward token => reward info.
     mapping(address => Reward) public rewardData;
+
+    /**
+     * @notice Mapping for staker address => address that can claim+receive tokens for them.
+     * @dev This mapping can only be updated by management.
+     */
+    mapping(address => address) public claimForRecipient;
 
     /**
      * @notice The amount of rewards allocated to a user per whole token staked.
@@ -176,10 +185,30 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
             rewards[account][_rewardToken];
     }
 
+    /**
+     * @notice Amount of reward token(s) pending claim by an account.
+     * @dev Checks for all rewardTokens.
+     * @param _account Account to check earned balance for.
+     * @return pending Amount of reward token(s) pending claim.
+     */
+    function earnedMulti(
+        address _account
+    ) public view virtual returns (uint256[] memory pending) {
+        address[] memory _rewardTokens = rewardTokens;
+        uint256 length = _rewardTokens.length;
+        pending = new uint256[](length);
+
+        for (uint256 i; i < length; ++i) {
+            pending[i] = earned(_account, _rewardTokens[i]);
+        }
+    }
+
     /// @notice Reward tokens emitted over the entire rewardsDuration.
     function getRewardForDuration(
         address _rewardToken
     ) external view virtual returns (uint256) {
+        /// @COMMENT consider adding an if statement here for rewardsDuration ==1 ?!?!?! if so, we can maybe use "real" rewardRate
+        
         return
             rewardData[_rewardToken].rewardRate *
             rewardData[_rewardToken].rewardsDuration;
@@ -226,7 +255,7 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
             address management = TokenizedStrategy.management();
 
             ERC20(_rewardToken).safeTransfer(management, _rewardAmount);
-            emit NotifiedWithZeroSupply(_rewardToken, reward);
+            emit NotifiedWithZeroSupply(_rewardToken, _rewardAmount);
             return;
         }
 
@@ -257,6 +286,14 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
                     _rewardData.rewardsDuration;
             }
 
+            // make sure we have enough reward token for our new rewardRate
+            require(
+                _rewardData.rewardRate <=
+                    (ERC20(_rewardsToken).balanceOf(address(this)) /
+                        _rewardData.rewardsDuration),
+                "Not enough balance"
+            );
+
             // write to storage
             rewardData[_rewardsToken] = _rewardData;
             emit RewardAdded(_rewardsToken, _rewardAmount);
@@ -269,6 +306,8 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         Reward memory _rewardData
     ) internal virtual {
         // Update lastNotifyTime and lastRewardRate if needed
+        // do we want to make sure this can't be called twice in the same block? maybe make sure both can't be called
+        // twice in the same block?
         if (block.timestamp != _rewardData.lastNotifyTime) {
             _rewardData.lastRewardRate =
                 _rewardAmount /
@@ -278,14 +317,14 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         }
 
         // Update rewardRate, lastUpdateTime, periodFinish
-        _rewardData.rewardRate = 0; /// @COMMENT not sure if this is correct...shouldn't we still calculate this?
+        _rewardData.rewardRate = 0; /// @COMMENT not sure if this is correct...shouldn't we still calculate this? Need to check and see where else it's used!!! ******
         _rewardData.lastUpdateTime = block.timestamp;
         _rewardData.periodFinish = block.timestamp;
 
         // Instantly release rewards by modifying rewardPerTokenStored
-        rewardData[_rewardToken].rewardPerTokenStored =
-            rewardData[_rewardToken].rewardPerTokenStored +
-            (reward * 1e18) /
+        _rewardData.rewardPerTokenStored =
+            _rewardData.rewardPerTokenStored +
+            (_rewardAmount * 1e18) /
             _totalSupply;
 
         // write to storage
@@ -293,16 +332,35 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         emit RewardAdded(_rewardsToken, _rewardAmount);
     }
 
-    /// @notice Claim any earned reward tokens.
-    /// @dev Can claim rewards even if no tokens still staked.
-    function getReward() public virtual nonReentrant updateReward(msg.sender) {
-        for (uint256 i = 0; i < rewardTokens.length; ++i) {
-            address rewardToken = rewardTokens[i];
-            uint256 reward = rewards[msg.sender][rewardToken];
+    /**
+     * @notice Claim any (and all) earned reward tokens.
+     * @dev Can claim rewards even if no tokens still staked.
+     */
+    function getReward() external nonReentrant updateReward(msg.sender) {
+        _getRewardFor(msg.sender, msg.sender);
+    }
+
+    /**
+     * @notice Claim any (and all) earned reward tokens for another user.
+     * @dev Mapping must be manually updated via management. Must be called by recipient.
+     * @param _staker Address of the user to claim rewards for.
+     */
+    function getRewardFor(
+        address _staker
+    ) external nonReentrant updateReward(_staker) {
+        require(claimForRecipient[_staker] == msg.sender, "!recipient");
+        _getRewardFor(_staker, msg.sender);
+    }
+
+    // internal function to get rewards.
+    function _getRewardFor(address _staker, address _recipient) internal {
+        for (uint256 i; i < rewardTokens.length; ++i) {
+            address _rewardToken = rewardTokens[i];
+            uint256 reward = rewards[_staker][_rewardToken];
             if (reward > 0) {
-                rewards[msg.sender][rewardToken] = 0;
-                ERC20(rewardToken).safeTransfer(msg.sender, reward);
-                emit RewardPaid(msg.sender, rewardToken, reward);
+                rewards[_staker][_rewardToken] = 0;
+                ERC20(_rewardToken).safeTransfer(_recipient, reward);
+                emit RewardPaid(_staker, _rewardToken, reward);
             }
         }
     }
@@ -332,7 +390,7 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
             msg.sender,
             10_000
         );
-        getReward();
+        _getRewardFor(msg.sender);
     }
 
     /**
@@ -390,13 +448,47 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         address _rewardToken,
         uint256 _rewardsDuration
     ) internal virtual {
+        // Previous rewards period must be complete before changing the duration for the new period
         require(
             block.timestamp > rewardData[_rewardToken].periodFinish,
-            "Previous rewards period must be complete before changing the duration for the new period"
+            "!period"
         );
         require(_rewardsDuration > 0, "Must be >0");
         rewardData[_rewardToken].rewardsDuration = _rewardsDuration;
         emit RewardsDurationUpdated(_rewardToken, _rewardsDuration);
+    }
+
+    /**
+     * @notice Setup a staker-recipient pair.
+     * @dev May only be called by management. Useful for contracts that can't handle extra reward tokens to direct
+     *  rewards elsewhere.
+     * @param _staker Address that holds the vault tokens.
+     * @param _recipient Address to claim and receive extra rewards on behalf of _staker.
+     */
+    function setClaimFor(
+        address _staker,
+        address _recipient
+    ) external virtual onlyManagement {
+        _setClaimFor(_staker, _recipient);
+    }
+
+    /**
+     * @notice Give another address permission to claim (and receive!) your rewards.
+     * @dev Useful if we want to add in complex logic following rewards claim such as staking.
+     * @param _recipient Address to claim and receive extra rewards on behalf of msg.sender.
+     */
+    function setClaimForMe(
+        address _recipient
+    ) external virtual {
+        _setClaimFor(msg.sender, _recipient);
+    }
+
+    function _setClaimFor(
+        address _staker,
+        address _recipient
+    ) internal virtual {
+        require(_staker != address(0), "No zero address");
+        claimForRecipient[_staker] = _recipient;
     }
 
     /// @COMMENT decide on this one whether we want to keep the "isRetired" usage, would need to add it in elsewhere
@@ -410,7 +502,7 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         address _tokenAddress,
         uint256 _tokenAmount
     ) external onlyManagement {
-        if (_tokenAddress == address(asset)) revert("!asset");
+        require(_tokenAddress != address(asset), "!asset");
 
         // can only recover reward tokens 90 days after last reward token ends
         bool isRewardToken;
