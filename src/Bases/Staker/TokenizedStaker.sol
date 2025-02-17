@@ -208,6 +208,7 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
         address _rewardToken
     ) external view virtual returns (uint256) {
         /// @COMMENT consider adding an if statement here for rewardsDuration ==1 ?!?!?! if so, we can maybe use "real" rewardRate
+        // I think here we would want to just have this return 1 * totalRewards or whatever...not sure though
         
         return
             rewardData[_rewardToken].rewardRate *
@@ -318,6 +319,7 @@ abstract contract TokenizedStaker is BaseHooks, ReentrancyGuard {
 
         // Update rewardRate, lastUpdateTime, periodFinish
         _rewardData.rewardRate = 0; /// @COMMENT not sure if this is correct...shouldn't we still calculate this? Need to check and see where else it's used!!! ******
+        // maybe we should actually store the rewardAmount here^^^??? that would actually be the rate since it's gone in 1 second
         _rewardData.lastUpdateTime = block.timestamp;
         _rewardData.periodFinish = block.timestamp;
 
