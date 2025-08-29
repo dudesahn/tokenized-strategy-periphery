@@ -9,6 +9,7 @@ size  :; forge build --sizes
 inspect :; forge inspect ${contract} storage-layout --pretty
 
 FORK_URL := ${ETH_RPC_URL} 
+test := test_kickAuction_fixedAmount
 
 # local tests without fork
 test  :; forge test -vv --fork-url ${FORK_URL} --ffi

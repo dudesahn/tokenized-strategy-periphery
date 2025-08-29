@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity >=0.8.18;
 
-import "forge-std/console.sol";
+import "forge-std/console2.sol";
 import {Setup, IStrategy, SafeERC20, ERC20} from "./utils/Setup.sol";
 
 import {IMockAuctioneer, MockAuctioneer} from "./mocks/MockAuctioneer.sol";
@@ -120,6 +120,40 @@ contract BaseAuctioneerTest is Setup {
         assertEq(_scaler, 0);
         assertEq(_initialAvailable, 0);
         assertEq(auctioneer.available(from), 0);
+    }
+
+    function test_kickAuction_fixedAmount() public {
+        uint256 _amount = 1e7;
+
+        address from = tokenAddrs["WBTC"];
+
+        fromScaler = WAD / 10 ** ERC20(from).decimals();
+        wantScaler = WAD / 10 ** ERC20(asset).decimals();
+
+        auctioneer.enable(from);
+        airdrop(ERC20(from), address(auctioneer), _amount);
+        auctioneer.kick(from);
+
+        uint256 minutesElapsed;
+        uint256 nextPrice;
+        uint256 stepSize;
+        uint256 percentDrop;
+        uint256 currentPrice = auctioneer.price(from);
+        skip(60);
+
+        // go for 6 hours
+        while (minutesElapsed < 1441) {
+            nextPrice = auctioneer.price(from);
+            stepSize = currentPrice - nextPrice;
+            uint256 percentDrop = (stepSize * 1e18) / currentPrice;
+            minutesElapsed += 1;
+            console2.log("Minutes Elapsed:", minutesElapsed);
+            console2.log("Price:", nextPrice);
+            console2.log("Percent Drop:", percentDrop);
+            console2.log("Percent Drop as BPS:", (percentDrop * 10_000) / 1e18);
+            currentPrice = nextPrice;
+            skip(60);
+        }
     }
 
     function test_kickAuction_default(uint256 _amount) public {
