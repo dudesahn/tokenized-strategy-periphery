@@ -44,6 +44,9 @@ contract Auction is Governance2Step, ReentrancyGuard {
     /// @notice Emitted when we update whether COW can use the next price or not.
     event UpdatedLetCowPeek(bool letCowPeek);
 
+    /// @notice Emitted when we update whether we allow partial takes.
+    event UpdatedRequireFullTake(bool requireFullTake);
+
     /// @notice Emitted when the auction is settled.
     event AuctionSettled(address indexed from);
 
@@ -99,6 +102,9 @@ contract Auction is Governance2Step, ReentrancyGuard {
 
     /// @notice Whether we allow cow solvers to submit solutions based on the next price.
     bool public letCowPeek;
+
+    /// @notice Whether we require the full token amount being auctioned to be sold in one transaction or not.
+    bool public requireFullTake;
 
     constructor() Governance2Step(msg.sender) {}
 
@@ -516,6 +522,18 @@ contract Auction is Governance2Step, ReentrancyGuard {
         emit UpdatedLetCowPeek(_letCowPeek);
     }
 
+    /**
+     * @notice Sets whether we allow partial takes in auctions.
+     * @param _requireFullTake Whether we allow partial takes or not.
+     */
+    function setRequireFullTake(
+        uint256 _requireFullTake
+    ) external virtual onlyGovernance {
+        requireFullTake = _requireFullTake;
+
+        emit UpdatedRequireFullTake(_requireFullTake);
+    }
+
     /*//////////////////////////////////////////////////////////////
                       PARTICIPATE IN AUCTION
     //////////////////////////////////////////////////////////////*/
@@ -624,6 +642,12 @@ contract Auction is Governance2Step, ReentrancyGuard {
 
         // Max amount that can be taken.
         uint256 _available = available(_from);
+
+        // if toggled on, require we take it all
+        if (requireFullTake) {
+            require(_available == _maxAmount, "!fullTake");
+        }
+
         _amountTaken = _available > _maxAmount ? _maxAmount : _available;
 
         // Get the amount needed
@@ -702,10 +726,17 @@ contract Auction is Governance2Step, ReentrancyGuard {
                 order.hash(ICowSettlement(COW_SETTLEMENT).domainSeparator()),
             "bad order"
         );
+
+        // if toggled on, require we take it all
+        if (requireFullTake) {
+            require(!order.partiallyFillable, "no partial fill");
+        } else {
+            require(order.partiallyFillable, "partial fill");
+        }
+
         require(paymentAmount != 0, "zero amount");
         require(available(address(order.sellToken)) != 0, "zero available");
         require(order.feeAmount == 0, "fee");
-        require(order.partiallyFillable, "partial fill");
         require(order.validTo < auction.kicked + AUCTION_LENGTH, "expired");
         require(order.appData == bytes32(0), "app data");
         require(order.buyAmount >= paymentAmount, "bad price");
